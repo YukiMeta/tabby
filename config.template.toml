@@ -1,0 +1,12 @@
+# Zen-Tabs 配置文件
+
+# Claude API 配置
+claude_api_key = ""
+claude_base_url = ""
+
+# OpenAI API 配置
+openai_api_key = ""
+
+# 自定义 API 配置（用于 Codex 或其他服务）
+custom_api_key = ""
+custom_base_url = ""
