@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, stdout},
+    process::Command,
     time::Duration,
 };
 
@@ -49,7 +50,6 @@ fn load_or_create_config() -> ApiConfig {
 
     if config_path.exists() {
         let content = fs::read_to_string(&config_path).unwrap_or_default();
-        // 简单 TOML 解析（实际项目应用 toml crate）
         ApiConfig {
             claude_api_key: extract_value(&content, "claude_api_key"),
             claude_base_url: extract_value(&content, "claude_base_url"),
@@ -58,7 +58,6 @@ fn load_or_create_config() -> ApiConfig {
             custom_base_url: extract_value(&content, "custom_base_url"),
         }
     } else {
-        // 创建默认配置
         let config = ApiConfig::default();
         let _ = fs::create_dir_all(config_path.parent().unwrap());
         let _ = fs::write(&config_path, format!(
@@ -91,8 +90,16 @@ fn extract_value(content: &str, key: &str) -> Option<String> {
 // ==================== 消息结构 ====================
 
 #[derive(Clone, Debug)]
+enum MessageRole {
+    User,
+    Assistant,
+    System,
+    ShellOutput,
+}
+
+#[derive(Clone, Debug)]
 struct Message {
-    role: String,
+    role: MessageRole,
     content: String,
 }
 
@@ -120,21 +127,13 @@ impl Tab {
         Self {
             name: name.to_string(),
             messages: vec![Message {
-                role: "system".to_string(),
+                role: MessageRole::System,
                 content: format!("欢迎使用 {}", name),
             }],
             input: String::new(),
             cursor_pos: 0,
             is_loading: false,
             api_type,
-        }
-    }
-
-    fn api_endpoint(&self, config: &ApiConfig) -> Option<String> {
-        match self.api_type {
-            ApiType::Claude => config.claude_base_url.clone(),
-            ApiType::OpenAI => Some("https://api.openai.com/v1/chat/completions".to_string()),
-            ApiType::Custom => config.custom_base_url.clone(),
         }
     }
 
@@ -173,6 +172,7 @@ impl App {
             show_help: false,
             config,
             status_message: String::from("准备就绪"),
+            last_command_output: None,
         }
     }
 
@@ -192,42 +192,154 @@ impl App {
         self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
     }
 
-    fn send_message(&mut self) {
+    /// 执行 shell 命令
+    fn run_shell_command(&mut self, cmd: &str) {
+        self.status_message = format!("执行：!{}", cmd);
+
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let result = if !out.stdout.is_empty() {
+                    String::from_utf8_lossy(&out.stdout).to_string()
+                } else if !out.stderr.is_empty() {
+                    String::from_utf8_lossy(&out.stderr).to_string()
+                } else {
+                    "命令执行成功（无输出）".to_string()
+                };
+
+                let tab = self.active_tab_mut();
+                tab.messages.push(Message {
+                    role: MessageRole::ShellOutput,
+                    content: format!("$ {}\n{}", cmd, result),
+                });
+                tab.is_loading = false;
+                self.status_message = "命令执行完成".to_string();
+            }
+            Err(e) => {
+                let tab = self.active_tab_mut();
+                tab.messages.push(Message {
+                    role: MessageRole::ShellOutput,
+                    content: format!("$ {}\n错误：{}", cmd, e),
+                });
+                self.status_message = "命令执行失败".to_string();
+            }
+        }
+    }
+
+    /// 执行内部命令（/ 开头）
+    fn run_internal_command(&mut self, cmd: &str) {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let command = parts.get(0).unwrap_or(&"");
+
+        match *command {
+            "help" | "?" => {
+                self.show_help = true;
+            }
+            "clear" => {
+                let tab = self.active_tab_mut();
+                tab.messages.clear();
+                tab.messages.push(Message {
+                    role: MessageRole::System,
+                    content: "对话已清空".to_string(),
+                });
+                self.status_message = "对话已清空".to_string();
+            }
+            "config" => {
+                let claude_status = if self.config.claude_api_key.is_some() { "已配置" } else { "未配置" };
+                let openai_status = if self.config.openai_api_key.is_some() { "已配置" } else { "未配置" };
+                let config_info = format!(
+                    "配置文件：~/.config/yuki/config.toml\n\
+                     Claude API: {}\n\
+                     OpenAI API: {}",
+                    claude_status,
+                    openai_status
+                );
+                let tab = self.active_tab_mut();
+                tab.messages.push(Message {
+                    role: MessageRole::System,
+                    content: config_info,
+                });
+                self.status_message = "配置信息已显示".to_string();
+            }
+            "reload" => {
+                self.config = load_or_create_config();
+                self.status_message = "配置已重新加载".to_string();
+            }
+            "tab" | "add" => {
+                if parts.len() > 1 {
+                    let new_tab_name = parts[1];
+                    self.tabs.push(Tab::new(new_tab_name, ApiType::Custom));
+                    self.status_message = format!("已添加标签：{}", new_tab_name);
+                } else {
+                    self.status_message = "用法：/add <标签名>".to_string();
+                }
+            }
+            _ => {
+                self.status_message = format!("未知命令：/{}", command);
+            }
+        }
+    }
+
+    /// 发送消息到 AI
+    fn send_to_ai(&mut self, input: &str) {
+        let tab = self.active_tab_mut();
+
+        tab.messages.push(Message {
+            role: MessageRole::User,
+            content: input.to_string(),
+        });
+        tab.is_loading = true;
+        tab.input.clear();
+        tab.cursor_pos = 0;
+
+        self.status_message = format!("正在发送请求到 {}...", self.active_tab().name);
+
+        // 模拟 API 响应
+        let response = simulate_api_response(input, &self.active_tab().name);
+
+        {
+            let tab = self.active_tab_mut();
+            tab.messages.push(Message {
+                role: MessageRole::Assistant,
+                content: response,
+            });
+            tab.is_loading = false;
+        }
+        self.status_message = "回复已完成".to_string();
+    }
+
+    fn process_input(&mut self) {
         let input = {
             let tab = self.active_tab();
-            tab.input.clone()
+            tab.input.trim().to_string()
         };
 
         if input.is_empty() {
             return;
         }
 
-        // 添加用户消息
-        {
-            let tab = self.active_tab_mut();
-            tab.messages.push(Message {
-                role: "user".to_string(),
-                content: input.clone(),
-            });
-            tab.is_loading = true;
-            tab.input.clear();
-            tab.cursor_pos = 0;
+        // 命令分流逻辑
+        if input.starts_with('!') {
+            // Shell 命令
+            let cmd = input.trim_start_matches('!').trim();
+            self.run_shell_command(cmd);
+        } else if input.starts_with('/') {
+            // 内部命令
+            let cmd = input.trim_start_matches('/').trim();
+            self.run_internal_command(cmd);
+        } else {
+            // 发送给 AI
+            self.send_to_ai(&input);
         }
 
-        self.status_message = format!("正在发送请求到 {}...", self.active_tab().name);
-
-        // 模拟 API 响应（实际项目中用 tokio + reqwest）
-        let response = simulate_api_response(&input, &self.active_tab().name);
-
-        {
-            let tab = self.active_tab_mut();
-            tab.messages.push(Message {
-                role: "assistant".to_string(),
-                content: response,
-            });
-            tab.is_loading = false;
-        }
-        self.status_message = "回复已完成".to_string();
+        // 清空输入框
+        let tab = self.active_tab_mut();
+        tab.input.clear();
+        tab.cursor_pos = 0;
     }
 
     fn handle_input(&mut self, key: event::KeyEvent) {
@@ -258,7 +370,6 @@ impl App {
                 self.show_help = !self.show_help;
             }
             event::KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                // 刷新/重新发送
                 self.status_message = "已刷新".to_string();
             }
             event::KeyCode::Char(c) => {
@@ -274,7 +385,7 @@ impl App {
                 }
             }
             event::KeyCode::Enter => {
-                self.send_message();
+                self.process_input();
             }
             event::KeyCode::Left => {
                 let tab = self.active_tab_mut();
@@ -304,10 +415,10 @@ fn ui(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .margin(0)
         .constraints([
-            Constraint::Length(3),  // 标签栏
-            Constraint::Min(0),     // 内容区
-            Constraint::Length(3),  // 输入区
-            Constraint::Length(1),  // 状态栏
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(f.area());
 
@@ -385,16 +496,11 @@ fn render_content(f: &mut Frame, app: &App, area: Rect) {
         .messages
         .iter()
         .flat_map(|msg| {
-            let prefix = match msg.role.as_str() {
-                "user" => "  > ",
-                "assistant" => "  ◰ ",
-                _ => "  · ",
-            };
-
-            let style = match msg.role.as_str() {
-                "user" => Style::default().fg(Color::Cyan),
-                "assistant" => Style::default().fg(Color::White),
-                _ => Style::default().fg(Color::DarkGray),
+            let (prefix, style) = match msg.role {
+                MessageRole::User => ("> ", Style::default().fg(Color::Cyan)),
+                MessageRole::Assistant => ("◰ ", Style::default().fg(Color::White)),
+                MessageRole::System => ("· ", Style::default().fg(Color::Yellow)),
+                MessageRole::ShellOutput => ("$ ", Style::default().fg(Color::Green)),
             };
 
             vec![Line::from(Span::styled(
@@ -432,10 +538,17 @@ fn render_content(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let tab = app.active_tab();
+    let input_prefix = if tab.input.starts_with('!') {
+        Span::styled("! ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else if tab.input.starts_with('/') {
+        Span::styled("/ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else {
+        Span::raw("> ")
+    };
 
     let input = Paragraph::new(Line::from(vec![
-        Span::raw("> "),
-        Span::styled(&tab.input[..tab.cursor_pos], Style::default().fg(Color::White)),
+        input_prefix,
+        Span::styled(&tab.input[..tab.cursor_pos.max(1)], Style::default().fg(Color::White)),
         Span::styled("█", Style::default().bg(Color::White).fg(Color::Black)),
         Span::styled(&tab.input[tab.cursor_pos..], Style::default().fg(Color::White)),
     ]))
@@ -478,26 +591,47 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_help_popup(f: &mut Frame, area: Rect) {
-    let help_area = centered_rect(55, 55, area);
+    let help_area = centered_rect(60, 65, area);
     f.render_widget(Clear, help_area);
 
     let help_text = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  帮助  ",
+            "  ❄️ Yuki 帮助  ",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  Ctrl + q      退出应用"),
-        Line::from("  Tab / S-Tab   切换标签"),
-        Line::from("  Alt + 1/2/3   跳转到指定标签"),
-        Line::from("  ?             显示/隐藏帮助"),
-        Line::from("  Enter         发送消息"),
-        Line::from("  Ctrl + r      刷新状态"),
+        Line::from(Span::styled("  【命令分流系统】", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(""),
-        Line::from("  配置文件：~/.config/yuki/config.toml"),
+        Line::from(vec![
+            Span::styled("  !", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" 后接 Shell 命令 - 直接在终端执行"),
+        ]),
+        Line::from("     例：!ls -la  查看文件"),
+        Line::from("     例：!cargo build  编译项目"),
+        Line::from("     例：!gh auth login  GitHub 登录"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  /", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" 后接内部命令 - Yuki 内置功能"),
+        ]),
+        Line::from("     例：/help  显示帮助"),
+        Line::from("     例：/clear 清空对话"),
+        Line::from("     例：/config 查看配置"),
+        Line::from("     例：/reload 重载配置"),
+        Line::from("     例：/add <名> 添加标签"),
+        Line::from(""),
+        Line::from(Span::raw("  其他输入  - 发送给当前标签的 AI 服务")),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled("  【快捷键】", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  Ctrl+q        退出应用"),
+        Line::from("  Tab / S-Tab   切换标签"),
+        Line::from("  Alt+1/2/3     跳转到指定标签"),
+        Line::from("  ?             显示/隐藏帮助"),
+        Line::from("  Enter         发送"),
         Line::from(""),
         Line::from(Span::styled(
             "  ❄️ Yuki - 极简 AI 终端",
