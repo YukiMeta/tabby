@@ -17,42 +17,87 @@
 ╰──────────────────────────────────────╯
 ```
 
-## 核心特性
+---
 
-### 📑 项目隔离
-每个项目独立上下文，切换 tab = 切换完整的对话记忆。
+## 🚀 快速开始（3 分钟上手）
 
-### 🧠 命令分流
-| 输入 | 处理 |
-|------|------|
-| `!ls` | Shell 命令，直接执行 |
-| `/help` | 内部命令，Tabby 功能 |
-| `你好` | 发送给 AI |
-
-### 📊 监测面板
-`Ctrl+m` 查看所有项目的今日进度。
-
-## 快速开始
+### 步骤 1：检查环境
 
 ```bash
-# 1. 克隆
+# 需要 Rust 环境，没有的话一键安装
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# 验证安装
+rustc --version    # 应该显示 rustc 1.x.x
+cargo --version    # 应该显示 cargo 1.x.x
+```
+
+### 步骤 2：下载 Tabby
+
+```bash
 git clone https://github.com/YukiMeta/tabby.git
 cd tabby
-
-# 2. 编译
-cargo build --release
-
-# 3. 运行
-./target/release/tabby
 ```
 
-或者安装到系统路径：
+### 步骤 3：编译
+
 ```bash
-./install.sh
-tabby  # 直接运行
+# 编译 release 版本（约 1-2 分钟）
+cargo build --release
 ```
 
-## 快捷键
+### 步骤 4：运行
+
+```bash
+# 方式 A：直接运行
+./target/release/tabby
+
+# 方式 B：安装到系统路径（推荐）
+./install.sh
+tabby  # 之后可以直接运行
+```
+
+### 步骤 5：配置 API（可选）
+
+Tabby 需要配置 AI API 才能对话。配置文件位于 `~/.config/tabby/config.toml`：
+
+```toml
+claude_api_key = "sk-你的密钥"
+claude_base_url = "https://你的代理地址"
+```
+
+或使用环境变量：
+```bash
+export ANTHROPIC_API_KEY="sk-..."
+export ANTHROPIC_BASE_URL="https://..."
+```
+
+---
+
+## 📖 使用指南
+
+### 核心概念
+
+Tabby 的每个项目都有**独立的对话历史**，就像浏览器的多个标签页：
+
+| 场景 | 用法 |
+|------|------|
+| 同时开发多个项目 | 每个项目一个 Tabby 标签 |
+| 切换工作上下文 | `Tab` 键切换，记忆完整保留 |
+| 查看进度 | `Ctrl+m` 打开监测面板 |
+
+### 命令分流
+
+Tabby 根据输入前缀决定如何处理：
+
+| 前缀 | 示例 | 处理方 |
+|------|------|--------|
+| `!` | `!ls -la` | Shell 命令，直接执行 |
+| `/` | `/new 项目名` | Tabby 内部命令 |
+| 无 | `写个排序` | 发送给 AI |
+
+### 快捷键
 
 | 按键 | 功能 |
 |------|------|
@@ -62,44 +107,53 @@ tabby  # 直接运行
 | `Ctrl+m` | 监测面板 |
 | `Alt+1/2/3` | 跳转到项目 1/2/3 |
 | `Enter` | 发送 |
-| `?` | 帮助 |
 
-## 命令
+---
 
-```
-!ls -la        # Shell 命令
-/new 项目名      # 新建项目
-/list          # 项目列表
-/clear         # 清空对话
-```
+## 🛠️ 常见问题
 
-## 配置
+### Q: 运行时提示 "Device not configured"
 
-配置文件位于 `~/.config/tabby/config.toml`
+**A**: Tabby 是 TUI 应用，必须在真正的 macOS 终端.App 中运行，不能在 IDE 输出面板或聊天工具内运行。
 
-```toml
-claude_api_key = "sk-..."
-claude_base_url = "https://..."
-openai_api_key = "sk-..."
-```
+### Q: 编译失败
 
-或使用环境变量：
+**A**: 确保 Rust 版本 >= 1.70：
 ```bash
-export ANTHROPIC_API_KEY="sk-..."
+rustup update
+cargo clean
+cargo build --release
 ```
 
-## 技术栈
+### Q: 配置不生效
 
-- Rust
-- Ratatui (TUI)
-- Crossterm (终端)
-- Serde (配置)
-- Chrono (时间)
+**A**: 检查配置文件位置：
+```bash
+cat ~/.config/tabby/config.toml
+```
 
-## License
+### Q: 数据存在哪里？
+
+**A**: 项目数据保存在 `~/.config/tabby/projects/<项目名>/project.json`
+
+---
+
+## 📦 技术栈
+
+- **Rust** - 系统编程语言
+- **Ratatui 0.29** - TUI 渲染库
+- **Crossterm 0.28** - 终端操作
+- **Serde + TOML** - 配置序列化
+- **Chrono** - 时间处理
+
+---
+
+## 📄 License
 
 MIT
 
 ---
 
-🐱 Tabby - 你的终端 AI 工作台
+**🐱 Tabby - 你的终端 AI 工作台**
+
+遇到问题？在 GitHub 提 Issue：https://github.com/YukiMeta/tabby/issues
