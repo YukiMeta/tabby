@@ -36,7 +36,7 @@
 
 ```bash
 # 1. 克隆
-git clone https://github.com/yourusername/tabby.git
+git clone https://github.com/YukiMeta/tabby.git
 cd tabby
 
 # 2. 编译
